@@ -1,0 +1,291 @@
+#!/usr/bin/env python
+
+import math
+import rospy
+import cv2
+import numpy as np
+from std_msgs.msg import Float64, Bool, Float64MultiArray
+from sensor_msgs.msg import JointState
+from scipy.optimize import fsolve
+from arm1.srv import *
+
+
+class ArmCommand(object):
+    def __init__(self):
+        # init symbols of completion of the moving loop
+        self.dis_y = 0.0
+        self.dis_z = 0.0
+        self.joint1_g = 0.0
+        self.midpoint = 0.0
+        self.image_range = 0.0
+        self.joint1_data = 0.0
+        self.x_at_goal = False
+        self.y_at_goal = False
+        self.z_at_goal = False
+        self.move_end = False
+        self.loop_sign = False
+
+        # init ros data
+        self.r = rospy.Rate(1)
+        rospy.set_param('~loop_sign', False)
+        self.start_time = rospy.Time.now().to_sec()
+        self.run_sign = False
+
+        # init Service
+        self.arm_mover = rospy.ServiceProxy('/arm_mover/arm_mover', GoToPosition)
+        self.msg = GoToPositionRequest()
+
+        if not self.run_sign:
+            self.arm_pos_set(pos_init=True)
+
+        # init Publisher
+        self.pub1 = rospy.Publisher('/arm_command/loop_sign', Bool, queue_size=10)
+        self.pub2 = rospy.Publisher('/arm_command/program_run', Bool, queue_size=10)
+
+        # init Subscriber
+        rospy.Subscriber('/image_process/point_exist', Bool, self.callback)
+        rospy.Subscriber('/arm_mover/move_end', Bool, self.move_callback)
+        rospy.loginfo('program is run')
+
+    # translate joints' values between calculated value and true value
+    def value_translation(self, joint_value, joint_name, joint_type):
+        if joint_type == 'cal2gaz':
+            if joint_name == 'joint2':
+                value = joint_value - 0.35
+            if joint_name == 'joint3':
+                value = joint_value + 0.6
+            if joint_name == 'joint4':
+                value = joint_value + 0.55
+        if joint_type == 'gaz2cal':
+            if joint_name == 'joint2':
+                value = joint_value + 0.35
+            if joint_name == 'joint3':
+                value = joint_value - 0.6
+            if joint_name == 'joint4':
+                value = joint_value - 0.55
+        return value
+
+    # set all positions of joints with this function
+    def arm_pos_set(self, joint1=0.0, joint2=0.52,
+                    joint3=-1.57,
+                    joint4=0.98,
+                    right_joint=1.0,
+                    left_joint=1.0,
+                    pos_init=False):
+        self.msg.joint1 = joint1
+        self.msg.joint2 = self.value_translation(joint2, 'joint2', 'cal2gaz')
+        self.msg.joint3 = self.value_translation(joint3, 'joint3', 'cal2gaz')
+        self.msg.joint4 = self.value_translation(joint4, 'joint4', 'cal2gaz')
+        self.msg.right_joint = right_joint
+        self.msg.left_joint = left_joint
+        response = self.arm_mover(self.msg)
+        if pos_init:
+            rospy.loginfo('init all joints position')
+
+    # The following parts are use for feedback loop
+    # at goal detection: return true, if it's less than an acceptable error.
+    def at_goal(self, pos_joint, goal_joint, error_parameter=40):
+        result = abs(pos_joint - goal_joint) <= abs(error_parameter)
+        return result
+
+    # determine the direction of the error
+    def sign_output(self, at_goal, delta):
+        if not at_goal:
+            if delta > 0:
+                sign = 1
+            else:
+                sign = -1
+        else:
+            sign = 0
+        return sign
+
+    # get the error direction
+    def img_data_to_error(self, midpoint, image_range, z_range_parameter=340):
+        # get error in x,y direction
+        camera_midpoint = [320, 290]
+        delta_x = camera_midpoint[0] - midpoint.data[0]
+        delta_y = camera_midpoint[1] - midpoint.data[1]
+        print(midpoint.data)
+
+        # get error in z direction
+        z_x = image_range.data[2] - image_range.data[0]
+        z_y = image_range.data[3] - image_range.data[1]
+        object_range = math.sqrt(z_x * z_x + z_y * z_y)
+        delta_z = z_range_parameter - object_range
+
+        if not self.z_at_goal:
+            self.x_at_goal = self.at_goal(midpoint.data[0], camera_midpoint[0])
+            self.y_at_goal = self.at_goal(midpoint.data[1], camera_midpoint[1])
+            self.z_at_goal = self.at_goal(object_range, z_range_parameter, error_parameter=30)
+
+        if self.z_at_goal:
+            self.x_at_goal = self.at_goal(midpoint.data[0], camera_midpoint[0], error_parameter=50)
+            self.y_at_goal = self.at_goal(midpoint.data[1], camera_midpoint[1], error_parameter=50)
+            self.z_at_goal = self.at_goal(object_range, z_range_parameter, error_parameter=30)
+
+        print(delta_x, delta_y, delta_z)
+
+        # get the sign in all direction
+        x_sign = self.sign_output(self.x_at_goal, delta_x)
+        y_sign = self.sign_output(self.y_at_goal, delta_y)
+        z_sign = self.sign_output(self.z_at_goal, delta_z)
+        return -x_sign, y_sign, z_sign
+
+    def joint_angle_limit(self, joint_value, joint_name):
+        joint_limit = False
+        if joint_name == 'joint2':
+            limit = [0.0, 1.57]
+        elif joint_name == 'joint3':
+            limit = [-1.57, 0]
+        elif joint_name == 'joint4':
+            limit = [0.0, 1.57]
+
+        if not limit[0] <= joint_value <= limit[1]:
+            joint_value = min(max(limit[0], joint_value), limit[1])
+            joint_limit = True
+        return joint_value, joint_limit
+
+    def get_joint_value(self):
+	joint_state = rospy.wait_for_message('/arm1/joint_states', JointState)
+
+        # get joints' real value
+        joint1 = joint_state.position[0]
+        joint2 = joint_state.position[1]
+        joint3 = joint_state.position[2]
+        joint4 = joint_state.position[3]
+
+        # translate joints' value
+        joint2 = self.value_translation(joint2, 'joint2', 'gaz2cal')
+        joint3 = self.value_translation(joint3, 'joint3', 'gaz2cal')
+        joint4 = self.value_translation(joint4, 'joint4', 'gaz2cal')
+	return joint1, joint2, joint3, joint4
+
+
+    def arm_controller(self, x_direction_sign, y_direction_sign, z_direction_sign, effect=0.01):
+
+	joint1, joint2, joint3, joint4 = self.get_joint_value()
+
+        joint1 = self.joint1_data.data
+
+        rospy.loginfo('get  :joint1:%s, joint2:%s, joint3:%s, joint4:%s', joint1, joint2, joint3, joint4)
+
+        # calculate the next joint value
+        joint1_cal = joint1 + effect * x_direction_sign
+        joint2_cal = joint2 + effect * y_direction_sign
+        joint3_cal = joint3 + effect * 5 * z_direction_sign
+        joint4_cal = abs(joint3) - abs(joint2) - 0.15
+        rospy.loginfo('cal  :joint1:%s, joint2:%s, joint3:%s, joint4:%s', joint1, joint2, joint3, joint4)
+
+        # limit joints' value
+        joint2_cal, joint2_limit = self.joint_angle_limit(joint2_cal, 'joint2')
+        joint3_cal, joint3_limit = self.joint_angle_limit(joint3_cal, 'joint3')
+        joint4_cal, joint4_limit = self.joint_angle_limit(joint4_cal, 'joint4')
+
+        # rospy.loginfo('limit:joint1:%s, joint2:%s, joint3:%s, joint4:%s', joint1, joint2, joint3, joint4)
+        limit = joint2_limit and joint3_limit and joint4_limit
+        if limit:
+            rospy.logwarn('target is out of the range!')
+
+        # set joints' value, at begin just set values of joint1 and joint2
+        if not (self.x_at_goal and self.y_at_goal):
+            self.arm_pos_set(joint1=joint1_cal, joint2=joint2_cal, joint3=joint3, joint4=joint4_cal)
+        else:
+            self.arm_pos_set(joint1=joint1_cal, joint2=joint2_cal, joint3=joint3_cal, joint4=joint4_cal)
+
+        while not self.move_end:
+            if self.move_end:
+                break
+        return True
+
+    def command_callback(self, exist):
+        self.run_sign = True
+        if exist:
+            try:
+                rospy.loginfo('point is exist!')
+                poex = rospy.get_param("/image_process/point_exist")
+                while not (self.x_at_goal and self.y_at_goal and self.z_at_goal):
+                    # get img data
+                    poex = rospy.get_param("/image_process/point_exist")
+                    if not poex:
+                        break
+                    rospy.set_param('~loop_sign', False)
+                    rospy.loginfo('start moving...')
+                    self.midpoint = rospy.wait_for_message('image_process/midpoint', Float64MultiArray)
+                    self.image_range = rospy.wait_for_message('image_process/image_range', Float64MultiArray)
+                    self.joint1_data = rospy.wait_for_message('image_process/joint1_position', Float64)
+
+                    # deal joints information
+                    x_sign, y_sign, z_sign = self.img_data_to_error(self.midpoint, self.image_range)
+                    print(x_sign, y_sign, z_sign)
+                    self.loop_sign = self.arm_controller(x_sign, y_sign, z_sign, effect=0.01)
+                    # self.pub1.publish(self.loop_sign)
+                    rospy.set_param('~loop_sign', True)
+                    self.r.sleep()
+                    
+                self.r.sleep()
+                
+                if poex:
+                    print('start to move gripper')
+                    # gripper start run
+                    joint1, joint2, joint3, joint4 = self.get_joint_value()
+
+                    self.arm_pos_set(joint1=joint1, joint2=joint2, joint3=joint3, joint4=joint4, 
+                                     left_joint=0.2, right_joint=0.2)
+
+                    self.r.sleep()
+                    print('return to initial position')
+
+                    # return to initial position
+                    self.arm_pos_set(left_joint=0.15, right_joint=0.15)
+                    self.r.sleep()
+
+                    # arm turn to predetermined position
+                    self.arm_pos_set(joint1=1.0, left_joint=0.15, right_joint=0.15)
+                    self.r.sleep()
+
+                    self.arm_pos_set(joint1=1.0, joint2=0.2, joint3=-1.0, joint4=0.8, 
+                                     left_joint=0.15, right_joint=0.15)
+                    self.r.sleep()
+
+                    # gripper opening
+                    self.arm_pos_set(joint1=1.0, joint2=0.2, joint3=-1.0, joint4=0.8,
+                                     left_joint=0.15, right_joint=0.15)
+                    self.r.sleep()
+
+                    self.arm_pos_set(pos_init=True)
+                    self.r.sleep()
+                    rospy.loginfo('program has finish')
+		    rospy.on_shutdown()
+
+            except rospy.ServiceException:
+                rospy.logwarn("Midpoint is exist, but service call failed")
+
+        else:
+            try:
+                rospy.loginfo('try to find target')
+                elapsed = rospy.Time.now().to_sec() - self.start_time
+                joint1 = math.sin(2 * math.pi * 0.05 * elapsed) * (math.pi / 2)
+                self.arm_pos_set(joint1=joint1)
+                # self.joint1_g = math.sin(2 * math.pi * 0.1 * elapsed) * (math.pi / 2)
+
+            except rospy.ServiceException:
+                rospy.logwarn("Midpoint is not exist and Service call failed")
+
+    def move_callback(self, move_end):
+        self.move_end = move_end.data
+
+    def callback(self, exist):
+        rospy.wait_for_service('arm_mover/arm_mover')
+        self.pub2.publish(True)
+        self.command_callback(exist.data)
+
+
+if __name__ == '__main__':
+    try:
+        node_name = 'arm_command'
+        rospy.init_node(node_name)
+        ArmCommand()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
+

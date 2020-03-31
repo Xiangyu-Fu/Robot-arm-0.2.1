@@ -1,0 +1,137 @@
+#!/usr/bin/env python
+
+import math
+import rospy
+import cv2
+import numpy as np
+from sensor_msgs.msg import Image, JointState
+from std_msgs.msg import Float64, Bool, Float64MultiArray
+from cv_bridge import CvBridge, CvBridgeError
+
+
+class ImgProcess(object):
+    def __init__(self):
+        self.node_name = 'image_process'
+
+        rospy.init_node(self.node_name)
+        self.bridge = CvBridge()
+        self.loop_sign = False
+        self.ac_run = False
+        self.r = rospy.Rate(5)
+        # Subscribers
+        self.sub1 = rospy.Subscriber("rgb_camera/image_raw", Image, self.img_process_callback)
+
+        # Publishers
+        self.pub1 = rospy.Publisher("/image_process/midpoint", Float64MultiArray, queue_size=1)
+        self.pub2 = rospy.Publisher("/image_process/image_range", Float64MultiArray, queue_size=1)
+        self.pub3 = rospy.Publisher("/image_process/point_exist", Bool, queue_size=1)
+        self.pub4 = rospy.Publisher('/image_process/joint1_position', Float64, queue_size=1)
+
+        rospy.loginfo("Waiting for image topics...")
+
+    def image_process(self, image):
+        image_hsv = cv2.cvtColor(image, cv2.COLOR_RGB2HSV)
+
+        orange_min = np.array([100, 128, 46])
+        orange_max = np.array([124, 255, 255])
+        mask = cv2.inRange(image_hsv, orange_min, orange_max)
+        ret, binary = cv2.threshold(mask, 1, 256, cv2.THRESH_BINARY)
+
+        non0_point = 0
+        non0_rows = 0
+        non0_cols = 0
+        length_max = 0
+        width_max = 0
+        length_min = 0
+        width_min = 0
+        point_exist = False
+
+        rows, cols = np.shape(binary)
+
+        # first loop check the target point, if it exist, set point_exist to True
+        for m in range(rows/2):
+            if point_exist:
+                break
+            for n in range(cols/2):
+                if binary[2*m, 2*n] != 0:
+                    point_exist = True
+                    break
+
+        # if target point exist, find its location
+        if point_exist:
+            for m in range(rows):
+                for n in range(cols):
+                    if binary[m, n] != 0:
+                        non0_rows += m
+                        non0_cols += n
+                        non0_point += 1
+
+                        if non0_point == 1:
+                            width_min = n
+                            length_min = m
+                        if n < width_min:
+                            width_min = n
+                        if n > width_max:
+                            width_max = n
+                        if m < length_min:
+                            length_min = m
+                        if m > length_max:
+                            length_max = m
+
+            midpoint = [int(non0_cols / non0_point), int(non0_rows / non0_point)]
+            min_point = [length_min, width_min]
+            max_point = [length_max, width_max]
+
+        else:
+            midpoint = [0, 0]
+            min_point = [0, 0]
+            max_point = [0, 0]
+
+        image_range = [min_point[0], min_point[1], max_point[0], max_point[1]]
+        return midpoint, image_range, point_exist
+
+    def img_process_callback(self, ros_image):
+        try:
+            frame = self.bridge.imgmsg_to_cv2(ros_image, "bgr8")
+        except CvBridgeError:
+            print('CvBrigeError!')
+
+        frame = np.array(frame, dtype=np.uint8)
+
+        midpoint, image_range, point_exist = self.image_process(frame)
+        midpoint_meg = Float64MultiArray(data=midpoint)
+        image_range_meg = Float64MultiArray(data=image_range)
+
+        if point_exist:
+            rospy.set_param('~point_exist', True)
+            rospy.loginfo('midpoint: %s, image_range: %s, %s, %s, %s',
+                          midpoint, image_range[0], image_range[1], image_range[2], image_range[3])
+            joint_state = rospy.wait_for_message('/arm1/joint_states', JointState)
+
+            rospy.loginfo('waiting for arm_command...loop_sign is %s', self.loop_sign)
+
+            while point_exist:
+                self.loop_sign = rospy.get_param("/arm_command/loop_sign")
+                rospy.loginfo('now loop_sign is %s', self.loop_sign)
+                self.pub1.publish(midpoint_meg)
+                self.pub2.publish(image_range_meg)
+                self.pub3.publish(point_exist)
+                self.pub4.publish(joint_state.position[0])
+                self.r.sleep()
+                if self.loop_sign:
+                    print('loop_sign is True, begin the next loop...')
+                    break
+
+        else:
+            rospy.set_param('~point_exist', False)
+            rospy.loginfo('None targets were detected, %s', point_exist)
+            self.pub3.publish(point_exist)
+
+
+if __name__ == '__main__':
+    try:
+        ImgProcess()
+        rospy.spin()
+    except rospy.ROSInterruptException:
+        pass
+

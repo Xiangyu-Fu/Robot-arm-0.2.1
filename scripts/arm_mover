@@ -1,0 +1,97 @@
+#!/usr/bin/env python
+
+import math
+import rospy
+from std_msgs.msg import Float64, Bool
+from sensor_msgs.msg import JointState
+from arm1.srv import *
+
+
+def at_goal(pos_joint, goal_joint):
+    tolerance = 1
+    result = abs(pos_joint - goal_joint) <= abs(tolerance)
+    rospy.loginfo('tolerance:%s',abs(pos_joint - goal_joint))
+    return result
+
+
+def move_arm(pos_joints):
+    time_elapsed = rospy.Time.now()
+    print'waiting for arm move'
+    for i in range(len(pos_joints)):
+        globals()['pub_j'+str(i+1)].publish(pos_joints[i])
+	pub_move_end.publish(False)
+
+
+    while True:
+	rospy.loginfo('waiting for message!')
+        joint_state = rospy.wait_for_message('/arm1/joint_states', JointState)
+        result = True
+        for i in range(len(pos_joints)):
+            result = at_goal(joint_state.position[i], pos_joints[i]) and result
+        if result:
+	    pub_move_end.publish(True)
+            time_elapsed = joint_state.header.stamp - time_elapsed
+            break
+
+    return time_elapsed
+
+
+
+def clamp_at_boundaries(requested_joint):
+    min_joint = rospy.get_param('~min_joint_angle', -3.14)
+    max_joint = rospy.get_param('~max_joint_angle', 3.14)
+
+    clamped_joint = requested_joint
+    if not min_joint <= requested_joint <= max_joint:
+        clamped_joint = min(max(requested_joint, min_joint), max_joint)
+        rospy.logwarn('j1 is out of bounds, valid range (%s,%s), clamping to: %s',
+                      min_joint, max_joint, clamped_joint)
+
+    return clamped_joint
+
+
+
+def handle_move_request(req):
+    joint1 = req.joint1
+    joint2 = req.joint2
+    joint3 = req.joint3
+    joint4 = req.joint4
+    right_joint = req.right_joint
+    left_joint = req.left_joint
+    joints = [joint1, joint2, joint3, joint4, right_joint, left_joint]
+    clamp_joint = [0, 0, 0, 0, 0, 0]
+
+    for i in range(len(joints)):
+        rospy.loginfo('GoToPositionRequest Received - j%s:%s,', i, joints[i])
+        clamp_joint[i] = clamp_at_boundaries(joints[i])
+    time_elapsed = move_arm(clamp_joint)
+
+    return GoToPositionResponse(time_elapsed)
+
+
+
+def mover_service():
+    rospy.init_node('arm_mover')
+    service = rospy.Service('~arm_mover', GoToPosition, handle_move_request)
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    pub_j1 = rospy.Publisher('/arm1/joint1_position_controller/command',
+                             Float64, queue_size=10)
+    pub_j2 = rospy.Publisher('/arm1/joint2_position_controller/command',
+                             Float64, queue_size=10)
+    pub_j3 = rospy.Publisher('/arm1/joint3_position_controller/command',
+                             Float64, queue_size=10)
+    pub_j4 = rospy.Publisher('/arm1/joint4_position_controller/command',
+                             Float64, queue_size=10)
+    pub_j5 = rospy.Publisher('/arm1/right_joint_position_controller/command',
+                             Float64, queue_size=10)
+    pub_j6 = rospy.Publisher('/arm1/left_joint_position_controller/command',
+                             Float64, queue_size=10)
+    pub_move_end = rospy.Publisher('/arm_mover/move_end', Bool, queue_size=10)
+    try:
+        mover_service()
+    except rospy.ROSInterruptException:
+        pass
+

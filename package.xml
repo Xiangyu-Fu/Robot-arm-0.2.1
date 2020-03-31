@@ -1,0 +1,26 @@
+<package format="2">
+  <name>arm1</name>
+  <version>1.0.0</version>
+  <description>
+    <p>URDF Description package for arm1</p>
+    <p>This package contains configuration data, 3D models and launch files
+for arm1 robot</p>
+  </description>
+  <author>TODO</author>
+  <maintainer email="TODO@email.com" />
+  <license>BSD</license>
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>message_generation</build_depend>
+
+  <depend>roslaunch</depend>
+  <depend>robot_state_publisher</depend>
+  <depend>rviz</depend>
+  <depend>joint_state_publisher</depend>
+  <depend>gazebo</depend>
+  <depend>message_runtime</depend>
+  <depend>xacro</depend>
+
+  <export>
+    <architecture_independent />
+  </export>
+</package>
