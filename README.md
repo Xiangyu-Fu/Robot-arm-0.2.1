@@ -28,5 +28,6 @@ rqt_image_view /rgb_camera/image_raw
 ```
 for example:
 ![example](https://img-blog.csdnimg.cn/20200401013234345.jpg?x-oss-process=image/watermark,type_ZmFuZ3poZW5naGVpdGk,shadow_10,text_aHR0cHM6Ly9ibG9nLmNzZG4ubmV0L3FxXzM3MjY2OTE3,size_16,color_FFFFFF,t_70)
+![gif](https://img-blog.csdnimg.cn/20200416064126290.gif)
 # 06.APR.2020 Updates
 Updated the solidworks file of the robot. Not sure if arm0.1.SLDASM can be opened, you may need to find the file again.
