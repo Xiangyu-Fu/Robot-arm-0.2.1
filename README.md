@@ -31,3 +31,6 @@ for example:
 ![gif](https://img-blog.csdnimg.cn/20200416064126290.gif)
 # 06.APR.2020 Updates
 Updated the solidworks file of the robot. Not sure if arm0.1.SLDASM can be opened, you may need to find the file again.
+
+# 11.APR.2021 Updates
+Upload the original package files, which exported from Solidworks 2017. Attention: The package name is gripper0 instead of arm0. You need to modify the package's name and then add it to your src file in your workspace. I didn't check its correctness! And this package just for display the original package file.
