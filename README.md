@@ -34,5 +34,8 @@ for example:
 # 06.APR.2020 Updates
 Updated the solidworks file of the robot. Not sure if arm0.1.SLDASM can be opened, you may need to find the file again.
 
+![arm0 1 1](https://user-images.githubusercontent.com/54738414/149679775-4d2d408a-f69c-46ed-ad45-38e39b8b6942.jpg)
+
+
 # 11.APR.2021 Updates
 Upload the original package files, which exported from Solidworks 2017. Attention: The package name is gripper0 instead of arm0. You need to modify the package's name and then add it to your src file in your workspace. I didn't check its correctness! And this package just for display the original package file.
